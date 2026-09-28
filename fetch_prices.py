@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -27,17 +28,33 @@ HEADERS = {
 FILE_RE = re.compile(rf"PriceFull\d+-\d+-{STORE_ID}-(\d{{8}}-\d{{6}})")
 
 
-def fetch(url: str, timeout: int) -> bytes:
-    """מוריד כתובת, עם עד 3 ניסיונות והמתנה הולכת וגדלה ביניהם."""
-    for attempt in range(1, 4):
+BLOB_BASE = "https://pricesprodpublic.blob.core.windows.net/pricefull"
+BLOB_LIST = BLOB_BASE + f"?restype=container&comp=list&prefix=PriceFull7290027600007-002-{STORE_ID}-"
+
+
+def fetch(url: str, timeout: int, attempts: int = 3) -> bytes:
+    """מוריד כתובת, עם כמה ניסיונות והמתנה הולכת וגדלה ביניהם."""
+    for attempt in range(1, attempts + 1):
         try:
             req = urllib.request.Request(url, headers=HEADERS)
             return urllib.request.urlopen(req, timeout=timeout).read()
         except Exception as e:
-            print(f"ניסיון {attempt} נכשל: {e!r}")
-            if attempt == 3:
+            print(f"  ניסיון {attempt} נכשל: {e!r}")
+            if attempt == attempts:
                 raise
-            time.sleep(30 * attempt)
+            time.sleep(15 * attempt)
+
+
+def probe(label: str, url: str):
+    """בדיקת אבחון: האם השרת עונה בכלל (כל תשובה, גם שגיאה, = השרת נגיש)."""
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        r = urllib.request.urlopen(req, timeout=20)
+        print(f"[אבחון] {label}: עונה (קוד {r.status})")
+    except urllib.error.HTTPError as e:
+        print(f"[אבחון] {label}: עונה (קוד {e.code})")
+    except Exception as e:
+        print(f"[אבחון] {label}: לא עונה ({e!r})")
 
 
 def file_time(name: str) -> str:
@@ -49,10 +66,9 @@ def file_time(name: str) -> str:
     return f"{d[:4]}-{d[4:6]}-{d[6:]}T{t[:2]}:{t[2:4]}:{t[4:]}"
 
 
-def download_latest() -> tuple:
-    """טוען את עמוד הרשימה, מוצא את הלינק העדכני ל-PriceFull של הסניף ומוריד אותו."""
-    page = fetch(LIST_URL, timeout=120).decode("utf-8", "ignore")
-
+def via_list_page() -> tuple:
+    """דרך א: עמוד הרשימה של אתר השקיפות."""
+    page = fetch(LIST_URL, timeout=60, attempts=2).decode("utf-8", "ignore")
     candidates = []
     for link in re.findall(r'href="([^"]+)"', page):
         link = html.unescape(link)
@@ -61,12 +77,37 @@ def download_latest() -> tuple:
             candidates.append((m.group(1), link))
     if not candidates:
         raise RuntimeError("לא נמצא קובץ PriceFull לסניף " + STORE_ID + " בעמוד הרשימה")
-
-    candidates.sort()               # לפי תאריך-שעה שבשם הקובץ
-    url = candidates[-1][1]         # העדכני ביותר
+    candidates.sort()
+    url = candidates[-1][1]
     name = url.split("?")[0]
     print("מוריד:", name)
     return fetch(url, timeout=180), file_time(name)
+
+
+def via_blob() -> tuple:
+    """דרך ב: ישירות משרת הקבצים (עובד רק אם הרשימה שם פתוחה לציבור)."""
+    xml_text = fetch(BLOB_LIST, timeout=60, attempts=2).decode("utf-8", "ignore")
+    names = sorted(re.findall(r"<Name>([^<]+)</Name>", xml_text), key=file_time)
+    if not names:
+        raise RuntimeError("שרת הקבצים ענה, אבל בלי קבצים של סניף " + STORE_ID)
+    name = names[-1]
+    print("מוריד:", name)
+    return fetch(f"{BLOB_BASE}/{name}", timeout=180), file_time(name)
+
+
+def download_latest() -> tuple:
+    probe("אתר השקיפות", "https://prices.shufersal.co.il/")
+    probe("שרת הקבצים", BLOB_BASE + "?restype=container")
+    probe("האתר הראשי של שופרסל", "https://www.shufersal.co.il/")
+    probe("אתר ביקורת (Google)", "https://www.google.com/")
+
+    print("דרך א: עמוד הרשימה")
+    try:
+        return via_list_page()
+    except Exception as e:
+        print("דרך א נכשלה:", repr(e))
+    print("דרך ב: ישירות משרת הקבצים")
+    return via_blob()
 
 
 def parse(gz_bytes: bytes) -> dict:
