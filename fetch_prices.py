@@ -11,27 +11,52 @@ import html
 import json
 import re
 import sys
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 
 STORE_ID = "413"  # שופרסל אונליין
 LIST_URL = f"https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=2&storeId={STORE_ID}"
 OUT_FILE = "shufersal.json"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
+}
+FILE_RE = re.compile(rf"PriceFull\d+-\d+-{STORE_ID}-(\d{{8}}-\d{{6}})")
 
 
-def download_latest() -> bytes:
+def fetch(url: str, timeout: int) -> bytes:
+    """מוריד כתובת, עם עד 3 ניסיונות והמתנה הולכת וגדלה ביניהם."""
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            return urllib.request.urlopen(req, timeout=timeout).read()
+        except Exception as e:
+            print(f"ניסיון {attempt} נכשל: {e!r}")
+            if attempt == 3:
+                raise
+            time.sleep(30 * attempt)
+
+
+def file_time(name: str) -> str:
+    """מחלץ את זמן הפרסום משם הקובץ: 20260927-034000 -> 2026-09-27T03:40:00"""
+    m = FILE_RE.search(name)
+    if not m:
+        return ""
+    d, t = m.group(1).split("-")
+    return f"{d[:4]}-{d[4:6]}-{d[6:]}T{t[:2]}:{t[2:4]}:{t[4:]}"
+
+
+def download_latest() -> tuple:
     """טוען את עמוד הרשימה, מוצא את הלינק העדכני ל-PriceFull של הסניף ומוריד אותו."""
-    req = urllib.request.Request(LIST_URL, headers=HEADERS)
-    page = urllib.request.urlopen(req, timeout=60).read().decode("utf-8", "ignore")
+    page = fetch(LIST_URL, timeout=120).decode("utf-8", "ignore")
 
-    links = re.findall(r'href="([^"]+)"', page)
-    pattern = re.compile(rf"PriceFull\d+-\d+-{STORE_ID}-(\d{{8}}-\d{{6}})")
     candidates = []
-    for link in links:
+    for link in re.findall(r'href="([^"]+)"', page):
         link = html.unescape(link)
-        m = pattern.search(link)
+        m = FILE_RE.search(link)
         if m:
             candidates.append((m.group(1), link))
     if not candidates:
@@ -39,9 +64,9 @@ def download_latest() -> bytes:
 
     candidates.sort()               # לפי תאריך-שעה שבשם הקובץ
     url = candidates[-1][1]         # העדכני ביותר
-    print("מוריד:", url.split("?")[0])
-    req = urllib.request.Request(url, headers=HEADERS)
-    return urllib.request.urlopen(req, timeout=120).read()
+    name = url.split("?")[0]
+    print("מוריד:", name)
+    return fetch(url, timeout=180), file_time(name)
 
 
 def parse(gz_bytes: bytes) -> dict:
@@ -70,12 +95,14 @@ def parse(gz_bytes: bytes) -> dict:
 def main():
     if len(sys.argv) > 1:
         gz_bytes = open(sys.argv[1], "rb").read()
+        published = file_time(sys.argv[1])
     else:
-        gz_bytes = download_latest()
+        gz_bytes, published = download_latest()
 
     prices = parse(gz_bytes)
     out = {
-        "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # מתי שופרסל פרסמו את הקובץ (שעון ישראל), לא מתי הסקריפט רץ
+        "updated": published,
         "store": STORE_ID,
         "prices": prices,
     }
