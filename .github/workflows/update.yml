@@ -1,0 +1,31 @@
+name: Update Shufersal prices
+ 
+on:
+  schedule:
+    - cron: "17 3 * * *"   # כל יום 03:17 UTC = בערך 6:17 בבוקר בישראל
+  workflow_dispatch:        # מאפשר הרצה ידנית מלשונית Actions
+ 
+permissions:
+  contents: write           # מאפשר ל-Action לעשות commit לקובץ
+ 
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - name: Download and process
+        run: python fetch_prices.py
+ 
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add shufersal.json
+          git diff --cached --quiet || git commit -m "Update Shufersal prices"
+          git push
+ 
